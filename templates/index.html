@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Blockchain Voting - Digital Signatures</title>
+    <style>
+        body { font-family: Arial; max-width: 1000px; margin: 20px auto; padding: 20px; }
+        .section { border: 1px solid #ccc; padding: 20px; margin-bottom: 20px; border-radius: 8px; }
+        button, input, select { padding: 8px; margin: 5px; }
+        .vote-btn { background-color: #4CAF50; color: white; }
+        .mine-btn { background-color: #ff9800; }
+        .admin-btn { background-color: #2196F3; color: white; }
+        .reset-btn { background-color: #dc3545; color: white; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        .error { color: red; }
+        .success { color: green; }
+        .info { color: blue; }
+        pre { background: #f4f4f4; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <h1>🗳️ Blockchain Voting System</h1>
+    <p><strong>Features:</strong> RSA digital signatures, eligible voter list (CSV), export results as CSV, admin reset.</p>
+
+    <!-- Voting section -->
+    <div class="section">
+        <h2>Cast Your Vote</h2>
+        <input type="text" id="voterId" placeholder="Voter ID (must be in eligible list)" size="40" />
+        <select id="candidate">
+            <option value="Alice">Alice</option>
+            <option value="Bob">Bob</option>
+            <option value="Charlie">Charlie</option>
+        </select>
+        <button id="voteBtn" class="vote-btn">Submit Signed Vote</button>
+        <span id="voteMessage"></span>
+        <div id="keyStatus" class="info"></div>
+    </div>
+
+    <!-- Admin mining -->
+    <div class="section">
+        <h2>Admin: Mine Pending Votes</h2>
+        <input type="password" id="adminPassword" placeholder="Admin password" />
+        <button id="mineBtn" class="mine-btn">Mine Pending Votes</button>
+        <span id="mineMessage"></span>
+    </div>
+
+    <!-- Admin upload eligible voters -->
+    <div class="section">
+        <h2>Admin: Upload Eligible Voters (CSV)</h2>
+        <input type="password" id="adminPassUpload" placeholder="Admin password" />
+        <input type="file" id="csvFile" accept=".csv" />
+        <button id="uploadBtn" class="admin-btn">Upload CSV</button>
+        <span id="uploadMessage"></span>
+        <p>CSV format: one voter ID per line, no header.</p>
+    </div>
+
+    <!-- Admin reset (delete all votes) -->
+    <div class="section">
+        <h2>⚠️ Admin: Reset Entire System</h2>
+        <input type="password" id="adminResetPassword" placeholder="Admin password" />
+        <button id="resetBtn" class="reset-btn">DELETE ALL VOTES & ELIGIBLE VOTERS</button>
+        <span id="resetMessage"></span>
+        <p>This will permanently delete all votes, pending transactions, and the eligible voter list. The blockchain will be reset to the genesis block.</p>
+    </div>
+
+    <!-- Results & export -->
+    <div class="section">
+        <h2>Live Results</h2>
+        <button id="refreshResults">Refresh</button>
+        <button id="exportBtn" class="admin-btn">Export Results as CSV</button>
+        <div id="resultsDiv"></div>
+    </div>
+
+    <!-- Blockchain explorer -->
+    <div class="section">
+        <h2>Blockchain Explorer</h2>
+        <button id="viewChain">View Full Chain</button>
+        <pre id="chainData"></pre>
+    </div>
+
+    <script>
+        // Helper: Clean base64 from newlines
+        function cleanBase64(str) {
+            return str.replace(/\s/g, '');
+        }
+
+        async function importPublicKey(pem) {
+            const pemHeader = "-----BEGIN PUBLIC KEY-----";
+            const pemFooter = "-----END PUBLIC KEY-----";
+            let pemContents = pem.substring(pemHeader.length, pem.length - pemFooter.length);
+            pemContents = cleanBase64(pemContents);
+            const binaryDer = Uint8Array.from(atob(pemContents), c => c.charCodeAt(0));
+            return await window.crypto.subtle.importKey(
+                "spki",
+                binaryDer,
+                { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+                false,
+                ["verify"]
+            );
+        }
+
+        async function importPrivateKey(pem) {
+            const pemHeader = "-----BEGIN PRIVATE KEY-----";
+            const pemFooter = "-----END PRIVATE KEY-----";
+            let pemContents = pem.substring(pemHeader.length, pem.length - pemFooter.length);
+            pemContents = cleanBase64(pemContents);
+            const binaryDer = Uint8Array.from(atob(pemContents), c => c.charCodeAt(0));
+            return await window.crypto.subtle.importKey(
+                "pkcs8",
+                binaryDer,
+                { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+                false,
+                ["sign"]
+            );
+        }
+
+        async function generateKeyPair() {
+            return await window.crypto.subtle.generateKey(
+                {
+                    name: "RSASSA-PKCS1-v1_5",
+                    modulusLength: 2048,
+                    publicExponent: new Uint8Array([1, 0, 1]),
+                    hash: "SHA-256",
+                },
+                true,
+                ["sign", "verify"]
+            );
+        }
+
+        async function exportPublicKeyPem(key) {
+            const exported = await window.crypto.subtle.exportKey("spki", key);
+            const exportedAsString = String.fromCharCode.apply(null, new Uint8Array(exported));
+            const exportedAsBase64 = btoa(exportedAsString);
+            const lines = exportedAsBase64.match(/.{1,64}/g).join('\n');
+            return `-----BEGIN PUBLIC KEY-----\n${lines}\n-----END PUBLIC KEY-----`;
+        }
+
+        async function exportPrivateKeyPem(key) {
+            const exported = await window.crypto.subtle.exportKey("pkcs8", key);
+            const exportedAsString = String.fromCharCode.apply(null, new Uint8Array(exported));
+            const exportedAsBase64 = btoa(exportedAsString);
+            const lines = exportedAsBase64.match(/.{1,64}/g).join('\n');
+            return `-----BEGIN PRIVATE KEY-----\n${lines}\n-----END PRIVATE KEY-----`;
+        }
+
+        async function getOrCreateKeys(voterId) {
+            const privKeyStorage = localStorage.getItem(`priv_${voterId}`);
+            const pubKeyStorage = localStorage.getItem(`pub_${voterId}`);
+            if (privKeyStorage && pubKeyStorage) {
+                const privKey = await importPrivateKey(privKeyStorage);
+                const pubKey = await importPublicKey(pubKeyStorage);
+                return { privateKey: privKey, publicKey: pubKey, publicKeyPem: pubKeyStorage };
+            }
+            const { privateKey, publicKey } = await generateKeyPair();
+            const privPem = await exportPrivateKeyPem(privateKey);
+            const pubPem = await exportPublicKeyPem(publicKey);
+            localStorage.setItem(`priv_${voterId}`, privPem);
+            localStorage.setItem(`pub_${voterId}`, pubPem);
+            return { privateKey, publicKey, publicKeyPem: pubPem };
+        }
+
+        async function signMessage(privateKey, message) {
+            const encoder = new TextEncoder();
+            const data = encoder.encode(message);
+            const signature = await window.crypto.subtle.sign(
+                { name: "RSASSA-PKCS1-v1_5" },
+                privateKey,
+                data
+            );
+            return btoa(String.fromCharCode.apply(null, new Uint8Array(signature)));
+        }
+
+        async function postJson(url, data) {
+            const resp = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+            return await resp.json();
+        }
+
+        // Voting
+        document.getElementById('voteBtn').onclick = async () => {
+            const voterId = document.getElementById('voterId').value.trim();
+            const candidate = document.getElementById('candidate').value;
+            const msgSpan = document.getElementById('voteMessage');
+            const keyStatus = document.getElementById('keyStatus');
+
+            if (!voterId) {
+                msgSpan.innerText = 'Enter Voter ID';
+                msgSpan.className = 'error';
+                return;
+            }
+
+            try {
+                keyStatus.innerText = `Generating/loading keys for ${voterId}...`;
+                const { privateKey, publicKeyPem } = await getOrCreateKeys(voterId);
+                const message = `${voterId}:${candidate}`;
+                const signature = await signMessage(privateKey, message);
+                keyStatus.innerText = `Keys ready. Submitting vote...`;
+
+                const result = await postJson('/vote', {
+                    voter_id: voterId,
+                    candidate: candidate,
+                    signature: signature,
+                    public_key: publicKeyPem
+                });
+
+                msgSpan.innerText = result.message;
+                msgSpan.className = result.success ? 'success' : 'error';
+                if (result.success) {
+                    document.getElementById('voterId').value = '';
+                }
+                refreshResults();
+            } catch (err) {
+                console.error(err);
+                msgSpan.innerText = 'Error: ' + err.message;
+                msgSpan.className = 'error';
+            }
+        };
+
+        // Mining
+        document.getElementById('mineBtn').onclick = async () => {
+            const password = document.getElementById('adminPassword').value;
+            const result = await postJson('/mine', { password });
+            const msgSpan = document.getElementById('mineMessage');
+            msgSpan.innerText = result.message;
+            msgSpan.className = result.success ? 'success' : 'error';
+            if (result.success) refreshResults();
+        };
+
+        // Upload CSV
+        document.getElementById('uploadBtn').onclick = async () => {
+            const password = document.getElementById('adminPassUpload').value;
+            const fileInput = document.getElementById('csvFile');
+            const file = fileInput.files[0];
+            if (!file) {
+                document.getElementById('uploadMessage').innerText = 'Select a CSV file';
+                return;
+            }
+            const formData = new FormData();
+            formData.append('password', password);
+            formData.append('file', file);
+            const resp = await fetch('/admin/upload_eligible', { method: 'POST', body: formData });
+            const data = await resp.json();
+            const msgSpan = document.getElementById('uploadMessage');
+            msgSpan.innerText = data.message;
+            msgSpan.className = data.success ? 'success' : 'error';
+        };
+
+        // Reset system
+        document.getElementById('resetBtn').onclick = async () => {
+            const password = document.getElementById('adminResetPassword').value;
+            if (!confirm('⚠️ Are you sure? This will delete ALL votes, pending transactions, and eligible voters. This action cannot be undone.')) {
+                return;
+            }
+            const result = await postJson('/admin/reset', { password });
+            const msgSpan = document.getElementById('resetMessage');
+            msgSpan.innerText = result.message;
+            msgSpan.className = result.success ? 'success' : 'error';
+            if (result.success) {
+                // Clear all stored keys from localStorage
+                const keysToRemove = [];
+                for (let i = 0; i < localStorage.length; i++) {
+                    const key = localStorage.key(i);
+                    if (key.startsWith('priv_') || key.startsWith('pub_')) {
+                        keysToRemove.push(key);
+                    }
+                }
+                keysToRemove.forEach(k => localStorage.removeItem(k));
+                // Refresh everything
+                refreshResults();
+                document.getElementById('chainData').textContent = '';
+                document.getElementById('voteMessage').innerText = '';
+                document.getElementById('mineMessage').innerText = '';
+                document.getElementById('uploadMessage').innerText = '';
+                document.getElementById('keyStatus').innerText = 'System reset. You can upload a new eligible voters CSV.';
+            }
+        };
+
+        // Export CSV
+        document.getElementById('exportBtn').onclick = () => {
+            window.location.href = '/export_results';
+        };
+
+        async function refreshResults() {
+            const resp = await fetch('/results');
+            const results = await resp.json();
+            let html = '<table><tr><th>Candidate</th><th>Votes</th></tr>';
+            for (const [cand, votes] of Object.entries(results)) {
+                html += `<tr><td>${cand}</td><td>${votes}</td></tr>`;
+            }
+            html += '</table>';
+            document.getElementById('resultsDiv').innerHTML = html;
+        }
+        document.getElementById('refreshResults').onclick = refreshResults;
+
+        // View chain
+        document.getElementById('viewChain').onclick = async () => {
+            const resp = await fetch('/chain');
+            const data = await resp.json();
+            document.getElementById('chainData').textContent = JSON.stringify(data, null, 2);
+        };
+
+        refreshResults();
+    </script>
+</body>
+</html>
